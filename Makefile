@@ -17,4 +17,4 @@ clean:
 	$(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) -C $(KDIR) M=$(PWD) clean
 
 # -C $(KDIR): change to $(KDIR) dir then read Makefile at that location
-#M=$(PWD): external module is here
+# M=$(PWD): external module is here
