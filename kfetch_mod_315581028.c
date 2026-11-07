@@ -35,7 +35,7 @@ static ssize_t kfetch_read(struct file *filp, char __user *buffer,
     size_t msg_len = sizeof(msg) - 1;
     size_t n;
 
-    if (*offset >= msg_len)          /* 已經讀完 → 回 0 代表 EOF */
+    if (*offset >= msg_len)
         return 0;
 
     n = min(length, msg_len - (size_t)*offset);
@@ -65,32 +65,40 @@ static const struct file_operations kfetch_ops = {
 
 /* ---------- 載入 / 卸載 ---------- */
 
-static int __init kfetch_init(void)
+static int __init kfetch_init(void)     // with __init marks, while using insmod, kernel will call the functions with this marks
 {
     struct device *dev;     // define by "linux/define.h"
     int ret;
 
-    /* Register device number： minor starts from 0, register 1 number, kfetch name */
+    /* 1. Register device number： minor starts from 0, register 1 number, kfetch name 
+    *     major: main device number (ex: RAM), minor: second device number (ex: sda0, sda1)
+    *     kfetch_devno: number allocated,
+    */
     ret = alloc_chrdev_region(&kfetch_devno, 0, 1, DEVICE_NAME);
     if (ret < 0) {
         pr_err("kfetch: alloc_chrdev_region failed %d\n", ret);
         return ret;
     }
 
-    /* 綁定 fops，並加入系統 */
-    cdev_init(&kfetch_cdev, &kfetch_ops);
-    ret = cdev_add(&kfetch_cdev, kfetch_devno, 1);
+    /* 2. bind fops，and add it to the system */
+    cdev_init(&kfetch_cdev, &kfetch_ops);   // initialize kfetch_cdev (ex: store kfetch_ops into cdev)
+    ret = cdev_add(&kfetch_cdev, kfetch_devno, 1);  // register in cdev_map to represent that this number is managed by kfetch_cdev
     if (ret)
         goto err_region;
 
-    /* 建立 class 與 device → /dev/kfetch 出現 */
-    kfetch_class = class_create(DEVICE_NAME);      /* 6.4+ 只傳一個參數 */
-    if (IS_ERR(kfetch_class)) {
-        ret = PTR_ERR(kfetch_class);
+    /* 3. create device class => generate sys/class/kfetch */
+    kfetch_class = class_create(DEVICE_NAME);   // if error, return a pointer
+    if (IS_ERR(kfetch_class)) {     // check error or not
+        ret = PTR_ERR(kfetch_class);    // take out the error code
         goto err_cdev;
     }
 
-    dev = device_create(kfetch_class, NULL, kfetch_devno, NULL, DEVICE_NAME);
+    /* 4. create dev/kfetch 
+    *     kfetch_class: which class this device belongs to
+    *     NULL: parent device
+    *     NULL: private data    
+    */
+    dev = device_create(kfetch_class, NULL, kfetch_devno, NULL, DEVICE_NAME);  
     if (IS_ERR(dev)) {
         ret = PTR_ERR(dev);
         goto err_class;
