@@ -72,7 +72,8 @@ static int __init kfetch_init(void)     // with __init marks, while using insmod
 
     /* 1. Register device number： minor starts from 0, register 1 number, kfetch name 
     *     major: main device number (ex: RAM), minor: second device number (ex: sda0, sda1)
-    *     kfetch_devno: number allocated,
+    *     kfetch_devno: number allocated
+    *     after registered, kernel will write this number into /proc/devices
     */
     ret = alloc_chrdev_region(&kfetch_devno, 0, 1, DEVICE_NAME);
     if (ret < 0) {
@@ -81,8 +82,8 @@ static int __init kfetch_init(void)     // with __init marks, while using insmod
     }
 
     /* 2. bind fops，and add it to the system */
-    cdev_init(&kfetch_cdev, &kfetch_ops);   // initialize kfetch_cdev (ex: store kfetch_ops into cdev)
-    ret = cdev_add(&kfetch_cdev, kfetch_devno, 1);  // register in cdev_map to represent that this number is managed by kfetch_cdev
+    cdev_init(&kfetch_cdev, &kfetch_ops);   // set who deals with this file operations. initialize kfetch_cdev (ex: store kfetch_ops into cdev)
+    ret = cdev_add(&kfetch_cdev, kfetch_devno, 1);  // register in cdev_map, when calling by user, kernel will use this to find file operations we developed
     if (ret)
         goto err_region;
 
