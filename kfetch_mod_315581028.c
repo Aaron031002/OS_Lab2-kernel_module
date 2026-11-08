@@ -4,14 +4,31 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/uaccess.h>   /* copy_to_user */
+#include <linux/mutex.h>     /* DEFINE_MUTEX, mutex_lock, mutex_unlock */
 
 #define DEVICE_NAME "kfetch"
+#define KFETCH_BUF_SIZE 1024
+
+#define KFETCH_NUM_INFO 6
+
+#define KFETCH_RELEASE   (1 << 0)
+#define KFETCH_NUM_CPUS  (1 << 1)
+#define KFETCH_CPU_MODEL (1 << 2)
+#define KFETCH_MEM       (1 << 3)
+#define KFETCH_UPTIME    (1 << 4)
+#define KFETCH_NUM_PROCS (1 << 5)
+
+#define KFETCH_FULL_INFO ((1 << KFETCH_NUM_INFO) - 1)
 
 static dev_t kfetch_devno;           /* store major + minor */
 static struct cdev kfetch_cdev;
 static struct class *kfetch_class;
 
-/* ---------- file operations（暫時版，Step 3 會改） ---------- */
+static DEFINE_MUTEX(kfetch_mutex);
+static int kfetch_mask = KFETCH_FULL_INFO;  // initialization to full info
+static char kfetch_buf[KFETCH_BUF_SIZE];    // max size of buffer (same as user buffer size)
+
+/* ---------- file operations ---------- */
 
 /* When user call open("dev/kfetch") */
 static int kfetch_open(struct inode *inode, struct file *filp)
@@ -29,29 +46,57 @@ static int kfetch_release(struct inode *inode, struct file *filp)
 
 /* When user call read(fd, buf, 4096) -> (file descriptor, store to where, max buffer size) */
 static ssize_t kfetch_read(struct file *filp, char __user *buffer,
-                           size_t length, loff_t *offset)
+                           size_t length, loff_t *offset)   // length is buffer size - 1
 {
-    static const char msg[] = "kfetch device works!\n";
-    size_t msg_len = sizeof(msg) - 1;
-    size_t n;
+    ssize_t ret;
+    size_t len;
 
-    if (*offset >= msg_len)
+    if (*offset > 0)    // read only one time(does not need multiple)
         return 0;
 
-    n = min(length, msg_len - (size_t)*offset);
-    if (copy_to_user(buffer, msg + *offset, n))
-        return -EFAULT;
+    mutex_lock(&kfetch_mutex);
 
-    *offset += n;
-    return n;
+    /* 0. clear buffer */
+    memset(kfetch_buf, 0, sizeof(kfetch_buf));
+    
+    /* 1. write text (kfetch_info) into kfetch_buf, at most write sizeof(kfetch_buf), return the len that actually written in */
+    len = scnprintf(kfetch_buf, sizeof(kfetch_buf), "current mask = 0x%02x\n", kfetch_mask);  
+
+    if (len > length)   // cannot send data that its size is larger than the user buffer
+        len = length;
+
+    /* 2. send info to user (write the result to user buffer) */
+    if (copy_to_user(buffer, kfetch_buf, len)) {
+        ret = -EFAULT;
+    } else {
+        *offset += len;
+        ret = len;
+    }
+
+    mutex_unlock(&kfetch_mutex);
+    return ret;
 }
 
 /* When user call write() */    // loff_t: long file offset
+// for the return type, ssize_t has negative value, can return -EFAULT...
 static ssize_t kfetch_write(struct file *filp, const char __user *buffer,
-                            size_t length, loff_t *offset)  
+                            size_t length, loff_t *offset)  // length is 4 bytes
 {
-    pr_info("kfetch: write %zu bytes\n", length);
-    return length;                   /* 先假裝收下，Step 3 再真的處理 */
+    int mask_info;
+
+    if (length < sizeof(mask_info))     // mask_info passed to here has exactly 4 bytes
+        return -EINVAL;
+
+    /* 1. copy the contents in user buffer to kernel buffer */
+    if (copy_from_user(&mask_info, buffer, sizeof(mask_info)))  // ensure copying 4 bytes
+        return -EFAULT;
+
+    mutex_lock(&kfetch_mutex);
+    /* 2. set the mask that user requested */
+    kfetch_mask = mask_info & KFETCH_FULL_INFO;     // set mask_info (with mutex since kfetch_mask is shared)
+    mutex_unlock(&kfetch_mutex);
+
+    return length;
 }
 
 /* Operation translating table (ex: open() -> kfetch_open()) */
@@ -63,7 +108,7 @@ static const struct file_operations kfetch_ops = {
     .release = kfetch_release,
 };
 
-/* ---------- 載入 / 卸載 ---------- */
+/* ---------- insmod / rmmod ---------- */
 
 static int __init kfetch_init(void)     // with __init marks, while using insmod, kernel will call the functions with this marks
 {
