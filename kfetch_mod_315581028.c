@@ -5,6 +5,13 @@
 #include <linux/module.h>
 #include <linux/uaccess.h>   /* copy_to_user */
 #include <linux/mutex.h>     /* DEFINE_MUTEX, mutex_lock, mutex_unlock */
+#include <linux/cpumask.h>       /* num_online_cpus, num_possible_cpus */
+#include <linux/mm.h>            /* si_meminfo, struct sysinfo */
+#include <linux/rcupdate.h>      /* rcu_read_lock, rcu_read_unlock */
+#include <linux/sched/signal.h>  /* for_each_process */
+#include <linux/string.h>        /* strscpy */
+#include <linux/timekeeping.h>   /* ktime_get_boottime_seconds */
+#include <linux/utsname.h>       /* utsname */
 
 #define DEVICE_NAME "kfetch"
 #define KFETCH_BUF_SIZE 1024
@@ -28,6 +35,38 @@ static DEFINE_MUTEX(kfetch_mutex);
 static int kfetch_mask = KFETCH_FULL_INFO;  // initialization to full info
 static char kfetch_buf[KFETCH_BUF_SIZE];    // max size of buffer (same as user buffer size)
 
+/* ---------- hardware information ---------- */
+
+/* get memory information (from fs/proc/meminfo.c) */
+static void kfetch_get_mem(unsigned long *free_mb, unsigned long *total_mb)
+{
+    struct sysinfo si;
+
+    si_meminfo(&si);    // store memory info to si struct
+    /* take out the info */
+    *free_mb  = (si.freeram  * si.mem_unit) >> 20;  // si.freeram returns in unit of pages, multiply by the page size (si.mem_unit) in bytes then divided to MB
+    *total_mb = (si.totalram * si.mem_unit) >> 20;
+}
+
+/* count the total number of processes */
+static int kfetch_get_procs(void)
+{
+    struct task_struct *p;      // process descriptor
+    int n = 0;
+
+    rcu_read_lock();    // rcu: Read-Copy Update
+    for_each_process(p)     // trace the main thread for each processes
+        n++;
+    rcu_read_unlock();
+    return n;
+}
+
+/* get the total time that starts from booting */
+static long long kfetch_get_uptime_min(void)
+{
+    return ktime_get_boottime_seconds() / 60;
+}
+
 /* ---------- file operations ---------- */
 
 /* When user call open("dev/kfetch") */
@@ -48,6 +87,9 @@ static int kfetch_release(struct inode *inode, struct file *filp)
 static ssize_t kfetch_read(struct file *filp, char __user *buffer,
                            size_t length, loff_t *offset)   // length is buffer size - 1
 {
+    struct new_utsname *uts = utsname();    // get info from system
+    unsigned long free_mb, total_mb;
+
     ssize_t ret;
     size_t len;
 
@@ -56,11 +98,30 @@ static ssize_t kfetch_read(struct file *filp, char __user *buffer,
 
     mutex_lock(&kfetch_mutex);
 
+    kfetch_get_mem(&free_mb, &total_mb);
+
     /* 0. clear buffer */
     memset(kfetch_buf, 0, sizeof(kfetch_buf));
     
     /* 1. write text (kfetch_info) into kfetch_buf, at most write sizeof(kfetch_buf), return the len that actually written in */
-    len = scnprintf(kfetch_buf, sizeof(kfetch_buf), "current mask = 0x%02x\n", kfetch_mask);  
+    len = scnprintf(kfetch_buf, sizeof(kfetch_buf), 
+                    "mask     = 0x%02x\n"
+                    "Hostname = %s\n"
+                    "Kernel   = %s\n"
+                    "CPU      = %s\n"
+                    "CPUs     = %u / %u\n"
+                    "Mem      = %lu MB / %lu MB\n"
+                    "Procs    = %d\n"
+                    "Uptime   = %lld mins\n",
+                    kfetch_mask, uts->nodename, uts->release, uts->machine,
+                    num_online_cpus(), num_possible_cpus(),
+                    free_mb, total_mb,
+                    kfetch_get_procs(), kfetch_get_uptime_min());
+    /* 
+     *  uts->nodename: hostname, uts->release: kernel version
+     *  num_online_cpus(): number of cpus that are currently working
+     *  num_possible_cpus(): the maximum number of cpus that this machine possibly have
+    */
 
     if (len > length)   // cannot send data that its size is larger than the user buffer
         len = length;
