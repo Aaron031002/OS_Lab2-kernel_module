@@ -27,6 +27,12 @@
 
 #define KFETCH_FULL_INFO ((1 << KFETCH_NUM_INFO) - 1)
 
+#define LOGO_LINES 7    // how many lines logo needs
+#define LOGO_WIDTH 20   // for the alignment
+#define LOGO_TOP   0    // vertically, from which line to start printing logo 
+#define INFO_MAX   (2 + KFETCH_NUM_INFO)    // max number of lines to print
+#define LINE_LEN   128  // max length for each line
+
 static dev_t kfetch_devno;           /* store major + minor */
 static struct cdev kfetch_cdev;
 static struct class *kfetch_class;
@@ -35,7 +41,19 @@ static DEFINE_MUTEX(kfetch_mutex);
 static int kfetch_mask = KFETCH_FULL_INFO;  // initialization to full info
 static char kfetch_buf[KFETCH_BUF_SIZE];    // max size of buffer (same as user buffer size)
 
-/* ---------- hardware information ---------- */
+static const char *kfetch_logo[LOGO_LINES] = {
+    "        .-.",
+    "       (.. |",
+    "       <>  |",
+    "      / --- \\",
+    "     ( |   | )",
+    "   |\\\\_)__(_//|",
+    "  <__)------(__>",
+};
+
+static char kfetch_info[INFO_MAX][LINE_LEN];   // total 8 lines, each has 128 bytes space
+
+/* ---------- system information ---------- */
 
 /* get memory information (from fs/proc/meminfo.c) */
 static void kfetch_get_mem(unsigned long *free_mb, unsigned long *total_mb)
@@ -67,6 +85,97 @@ static long long kfetch_get_uptime_min(void)
     return ktime_get_boottime_seconds() / 60;
 }
 
+/* ---------- show information & logo ---------- */
+
+/* show information */
+static int kfetch_build_info(int mask)
+{
+    /* 
+     *  uts->nodename: hostname, uts->release: kernel version
+     *  num_online_cpus(): number of cpus that are currently working
+     *  num_possible_cpus(): the maximum number of cpus that this machine possibly have
+     */
+
+    struct new_utsname *uts = utsname();
+    unsigned long free_mb, total_mb;
+    size_t host_len;
+    char *line;
+    int n = 0;
+    int i;
+
+    /* first line: hostname */
+    strscpy(kfetch_info[n++], uts->nodename, LINE_LEN);     // automatically add '\0'
+
+    /* second line: separate line that length is the same as hostname */
+    host_len = strlen(uts->nodename);
+    memset(kfetch_info[n], '-', host_len);
+    kfetch_info[n][host_len] = '\0';
+    n++;
+
+    /* other lines：從 bit 0 檢查到 bit 5，順序自動正確 */
+    for (i = 0; i < KFETCH_NUM_INFO; i++) {
+        if (!(mask & (1 << i)))     // if do not need to show the current info, run the next round
+            continue;
+
+        line = kfetch_info[n++];    // line = the current line
+
+        switch (1 << i) {
+            case KFETCH_RELEASE:
+                snprintf(line, LINE_LEN, "Kernel: %s", uts->release);   // line: the buffer that the texts should write into, LINE_LEN: max size to write
+                break;
+
+            case KFETCH_NUM_CPUS:
+                snprintf(line, LINE_LEN, "CPUs:   %u / %u", num_online_cpus(), num_possible_cpus());
+                break;
+
+            case KFETCH_CPU_MODEL:
+                snprintf(line, LINE_LEN, "CPU:    %s", uts->machine);
+                break;
+
+            case KFETCH_MEM:
+                kfetch_get_mem(&free_mb, &total_mb);
+                snprintf(line, LINE_LEN, "Mem:    %lu MB / %lu MB", free_mb, total_mb);
+                break;
+
+            case KFETCH_UPTIME:
+                snprintf(line, LINE_LEN, "Uptime: %lld mins", kfetch_get_uptime_min());
+                break;
+
+            case KFETCH_NUM_PROCS:
+                snprintf(line, LINE_LEN, "Procs:  %d", kfetch_get_procs());
+                break;
+        }
+    }
+
+    return n;   // return the total lines info occupied
+}
+
+/* compose info & logo together */
+static size_t kfetch_compose(char *buf, size_t size, int mask)
+{
+    int n_info = kfetch_build_info(mask);   // how many lines info use
+    int total = max(LOGO_TOP + LOGO_LINES, n_info);     // maximum total line
+    size_t len = 0;
+    int i;
+
+    for (i = 0; i < total; i++) {
+        int li = i - LOGO_TOP;
+        const char *logo = (li >= 0 && li < LOGO_LINES) ? kfetch_logo[li] : "";
+        const char *info = (i < n_info) ? kfetch_info[i] : "";
+
+        if (*info)
+            len += scnprintf(buf + len, size - len, "%-*s%s\n",
+                             LOGO_WIDTH, logo, info);   
+                // -: align to left, place white space at the rest, *: depends on the next parameter(LOGO_WIDTH)
+                // ex: * = 20, 5 bytes text -> 5 text first, 15 white space for the rest
+        else
+            len += scnprintf(buf + len, size - len, "%s\n", logo);
+        // scnprintf(): return the bytes that actually be written in, includes '\n' but not '\0'
+    }
+
+    return len;     // how many bytes that logo & info actually used
+}
+
 /* ---------- file operations ---------- */
 
 /* When user call open("dev/kfetch") */
@@ -87,9 +196,6 @@ static int kfetch_release(struct inode *inode, struct file *filp)
 static ssize_t kfetch_read(struct file *filp, char __user *buffer,
                            size_t length, loff_t *offset)   // length is buffer size - 1
 {
-    struct new_utsname *uts = utsname();    // get info from system
-    unsigned long free_mb, total_mb;
-
     ssize_t ret;
     size_t len;
 
@@ -98,30 +204,11 @@ static ssize_t kfetch_read(struct file *filp, char __user *buffer,
 
     mutex_lock(&kfetch_mutex);
 
-    kfetch_get_mem(&free_mb, &total_mb);
-
     /* 0. clear buffer */
     memset(kfetch_buf, 0, sizeof(kfetch_buf));
     
-    /* 1. write text (kfetch_info) into kfetch_buf, at most write sizeof(kfetch_buf), return the len that actually written in */
-    len = scnprintf(kfetch_buf, sizeof(kfetch_buf), 
-                    "mask     = 0x%02x\n"
-                    "Hostname = %s\n"
-                    "Kernel   = %s\n"
-                    "CPU      = %s\n"
-                    "CPUs     = %u / %u\n"
-                    "Mem      = %lu MB / %lu MB\n"
-                    "Procs    = %d\n"
-                    "Uptime   = %lld mins\n",
-                    kfetch_mask, uts->nodename, uts->release, uts->machine,
-                    num_online_cpus(), num_possible_cpus(),
-                    free_mb, total_mb,
-                    kfetch_get_procs(), kfetch_get_uptime_min());
-    /* 
-     *  uts->nodename: hostname, uts->release: kernel version
-     *  num_online_cpus(): number of cpus that are currently working
-     *  num_possible_cpus(): the maximum number of cpus that this machine possibly have
-    */
+    /* 1. write logo & info into kfetch_buf, at most write sizeof(kfetch_buf), return the len that actually written in */
+    len = kfetch_compose(kfetch_buf, sizeof(kfetch_buf), kfetch_mask);
 
     if (len > length)   // cannot send data that its size is larger than the user buffer
         len = length;
