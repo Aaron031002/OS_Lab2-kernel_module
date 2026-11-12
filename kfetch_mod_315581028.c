@@ -13,7 +13,7 @@
 #include <linux/timekeeping.h>   /* ktime_get_boottime_seconds */
 #include <linux/utsname.h>       /* utsname */
 
-#define DEVICE_NAME "kfetch"
+#define KFETCH_DEV_NAME "kfetch"
 #define KFETCH_BUF_SIZE 1024
 
 #define KFETCH_NUM_INFO 6
@@ -271,7 +271,7 @@ static int __init kfetch_init(void)     // with __init marks, while using insmod
     *     kfetch_devno: number allocated
     *     after registered, kernel will write this number into /proc/devices
     */
-    ret = alloc_chrdev_region(&kfetch_devno, 0, 1, DEVICE_NAME);
+    ret = alloc_chrdev_region(&kfetch_devno, 0, 1, KFETCH_DEV_NAME);
     if (ret < 0) {
         pr_err("kfetch: alloc_chrdev_region failed %d\n", ret);
         return ret;
@@ -284,7 +284,7 @@ static int __init kfetch_init(void)     // with __init marks, while using insmod
         goto err_region;
 
     /* 3. create device class => generate sys/class/kfetch */
-    kfetch_class = class_create(DEVICE_NAME);   // if error, return a pointer
+    kfetch_class = class_create(KFETCH_DEV_NAME);   // if error, return a pointer
     if (IS_ERR(kfetch_class)) {     // check error or not
         ret = PTR_ERR(kfetch_class);    // take out the error code
         goto err_cdev;
@@ -295,14 +295,14 @@ static int __init kfetch_init(void)     // with __init marks, while using insmod
     *     NULL: parent device
     *     NULL: private data    
     */
-    dev = device_create(kfetch_class, NULL, kfetch_devno, NULL, DEVICE_NAME);  
+    dev = device_create(kfetch_class, NULL, kfetch_devno, NULL, KFETCH_DEV_NAME);  
     if (IS_ERR(dev)) {
         ret = PTR_ERR(dev);
         goto err_class;
     }
 
     pr_info("kfetch: /dev/%s created, major=%d minor=%d\n",
-            DEVICE_NAME, MAJOR(kfetch_devno), MINOR(kfetch_devno));
+            KFETCH_DEV_NAME, MAJOR(kfetch_devno), MINOR(kfetch_devno));
     return 0;
 
 err_class:
