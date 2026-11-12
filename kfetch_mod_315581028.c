@@ -215,6 +215,7 @@ static ssize_t kfetch_read(struct file *filp, char __user *buffer,
 
     /* 2. send info to user (write the result to user buffer) */
     if (copy_to_user(buffer, kfetch_buf, len)) {
+        pr_alert("Failed to copy data to user");
         ret = -EFAULT;
     } else {
         *offset += len;
@@ -236,8 +237,10 @@ static ssize_t kfetch_write(struct file *filp, const char __user *buffer,
         return -EINVAL;
 
     /* 1. copy the contents in user buffer to kernel buffer */
-    if (copy_from_user(&mask_info, buffer, sizeof(mask_info)))  // ensure copying 4 bytes
+    if (copy_from_user(&mask_info, buffer, sizeof(mask_info))){  // ensure copying 4 bytes
+        pr_alert("Failed to copy data from user");
         return -EFAULT;
+    }
 
     mutex_lock(&kfetch_mutex);
     /* 2. set the mask that user requested */
